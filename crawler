@@ -1,0 +1,292 @@
+// import required packages
+const puppeteer = require('puppeteer');
+const fs = require('fs');
+const sanitizeHtml = require('sanitize-html')
+
+// begin
+async function crawl(url) {
+  console.time('TOTAL SCRAPING TIME')
+  console.log("\x1b[0m", "\x1b[47m", "\x1b[30m",
+    'Avon Web Crawler v1.0\n',
+    ' Coded by evg1n\n',
+    ' https://www.github.com/evg1n', "\x1b[0m");
+  // start browser
+  const browser = await puppeteer.launch({
+    headless: true,
+    args: ['--no-sandbox', '--disable-setuid-sandbox']
+  });
+  // create window
+  const page = await browser.newPage();
+  await page.goto(url);
+  await page.setViewport({
+    width: 1200,
+    height: 800
+  });
+  // wait for selectors
+  console.log('>>WAITING FOR SELECTORS')
+  await page.waitForSelector('div.SocialSharing');
+  await page.waitForSelector('div.ProductListLayout a.ListButton');
+  // toggle listview
+  await page.click('div.ProductListLayout.ng-scope a.ListButton');
+  // list all items if available
+  if (await page.$('a.ViewAllButton.ng-scope')) {
+    await page.click('a.ViewAllButton.ng-scope');
+  }
+  //start scrolling
+  await autoScroll(page);
+  //start craping links
+  console.log('>>NOW SCRAPING LINKS')
+  await scrapeLinks(page);
+  console.timeEnd('TOTAL SCRAPING TIME')
+}
+
+// scroller function
+async function autoScroll(page) {
+  await page.evaluate(async () => {
+    await new Promise((resolve, reject) => {
+      var totalHeight = 0;
+      var distance = 200;
+      var timer = setInterval(() => {
+        var scrollHeight = document.body.scrollHeight;
+        window.scrollBy(0, distance);
+        totalHeight += distance;
+        if (totalHeight >= scrollHeight) {
+          clearInterval(timer);
+          resolve();
+        }
+      }, 200);
+    });
+  });
+}
+
+// scrape product links to an array
+async function scrapeLinks(page) {
+  let links = [];
+  let newLinks = await page.evaluate(() => {
+    let items = Array.from(document.querySelectorAll('div.ProductListItem'));
+    let productInfo = [];
+    // iterate through dom elements
+    for (item of items) {
+      productInfo.push(
+        String(item.querySelector('a.ProductName.ng-binding').href)
+      )
+    }
+    return productInfo
+  })
+  links = links.concat(newLinks);
+  //console.log('\x1b[37m', links);
+  await getProductInfo(links);
+}
+// crawl all links to get product info
+async function getProductInfo(arrayOfLinks) {
+  let links = arrayOfLinks;
+  const productData = [];
+  const brokenLink = [];
+  let category = undefined;
+  //iterate links
+  for (let link = 0; link < links.length; link++) {
+    category = links[link].split('/')[5];
+    //open new browser instance
+    let newBrowser = await puppeteer.launch({
+      headless: true,
+      args: ['--no-sandbox', '--disable-setuid-sandbox']
+    });
+    console.log("\x1b[35m", '>>BROWSER INSTANCE LAUNCHED', "\x1b[37m");
+    let newTab = await newBrowser.newPage();
+
+    // try loading page
+    while (true) {
+      try {
+        //const navigationPromise = newTab.waitForNavigation();
+        console.log('>>URL TRIGGERED:', "\x1b[34m", links[link], "\x1b[0m");
+        await newTab.goto(links[link]);
+        await newTab.waitForSelector('div#fb-root.fb_reset');
+        console.log('>>SELECTOR LOADED')
+        await autoScroll(newTab);
+        //console.log('Scrolled Down!')
+        //await navigationPromise;
+        console.log('>>PAGE LOADED')
+        Promise.resolve(newTab);
+        break;
+      } catch (e) {
+        console.log("\x1b[31m", '>>PAGE LOAD ERROR', e, "\x1b[0m");
+        console.log("\x1b[33m", 'RELOADING', "\x1b[0m");
+        // give another shot
+        try {
+          let i = 0
+          if (i < 5) {
+            await newTab.reload(links[link]);
+            i++;
+          } else {
+            console.log("\x1b[41m", "\x1b[47m", '!!COULD NOT LOAD THE PAGE AFTER 5/5 ATTEMPTS', "\x1b[0m");
+            break
+          };
+
+        } catch (e) {
+          console.log("\x1b[41m", "\x1b[47m", '!!PAGE LOAD ERROR QUITTING', e, "\x1b[0m");
+        }
+      }
+    }
+    console.log("\x1b[32m", '>>CONTENT LOADED!', "\x1b[0m");
+
+    //console.log(await newTab.content());
+    // descriptions
+
+    let productInfoPage = await newTab.evaluate(async () => {
+      let shopContext = await window._ShopContext;
+      console.log(shopContext);
+      return shopContext.ProductViewModel;
+    })
+
+    try {
+      let productInfoString = String(JSON.stringify(productInfoPage));
+      //console.log("STRING", productInfoString);
+
+      let productInfoParsed = JSON.parse(productInfoString);
+
+      let urunID = productInfoParsed.Product.ProductId ? productInfoParsed.Product.ProductId : "";
+      let urunAdi = productInfoParsed.Product.Name ? productInfoParsed.Product.Name : "";
+      let tanitim = productInfoParsed.Description ? productInfoParsed.Description : "";
+      let altKategori = productInfoParsed.Product.Dept.Name ? productInfoParsed.Product.Dept.Name : "";
+      let anaKategori = productInfoParsed.Product.Level2.Name ? productInfoParsed.Product.Level2.Name : "";
+      let resim = productInfoParsed.ImageUrls[0] ? productInfoParsed.ImageUrls[0] : ""
+      let listeFiyati = productInfoParsed.Product.ListPrice ? productInfoParsed.Product.ListPrice : "Fiyat Girilmemiş";
+      let indirimliFiyati = productInfoParsed.Product.SalePrice ? productInfoParsed.Product.SalePrice : "Ürün İndirimde Değil"
+      let kategoriSlug = productInfoParsed.Product.Level2.Slug ? productInfoParsed.Product.Level2.Slug : "";
+      let urunSlug = productInfoParsed.Product.Slug ? productInfoParsed.Product.Slug : "";
+      //console.log("OBJECT:", productInfoParsed);
+      let productObj = {
+        URUN_ID: urunID,
+        URUN_ADI: urunAdi,
+        TANITIM: sanitizeHtml(tanitim, {
+          allowedTags: []
+        }).replace(/[\n\t\r]/g, ""),
+        ALT_KATEGORI: altKategori,
+        ANA_KATEGORI: anaKategori,
+        ETIKETLER: String(`${urunAdi.split(' ')},${altKategori.split(' ')},${anaKategori.split(' ')},${urunSlug.split('-')}`),
+        RESIM: resim,
+        LISTE_FIYATI: listeFiyati,
+        INDIRIMLI_FIYATI: indirimliFiyati,
+        STOK_MIKTARI: String(100),
+        PRESTA_FIYATI: String(parseFloat(listeFiyati) - parseFloat(indirimliFiyati) - 1),
+        URUN_URL: links[link],
+        RESIM_URL: `http://bot1.girist.com.tr/resimler/${urunID}.jpg`,
+        SLUG: urunSlug,
+        CAT_SLUG: kategoriSlug,
+      }
+
+      // take screenshot of product image
+      await screenshotDOMElement({
+        path: `${__dirname}/resimler/${productObj.URUN_ID}.jpg`,
+        selector: '#ProductMediaCarousel > div.ScrollClip > div > div.Slides > div > a > div > div > div > img',
+        padding: 0
+      }, newTab);
+      //console.log(JSON.stringify(productInfoPage));
+      console.log("\x1b[32m", '>>PRODUCT IMAGE SAVED', "\x1b[0m");
+      productData.push(productObj);
+
+
+    } catch (e) {
+      console.error(e);
+      console.log(">>PRODUCT DATA IS CORRUPT!")
+      console.log("\x1b[41m", "\x1b[37m", '!!PRODUCT DATA IS CORRUPT. CONSIDER ADDING MANUALLY.', links[link], "\x1b[0m");
+      brokenLink.push(links[link]);
+      continue
+    }
+
+
+    //console.log(JSON.stringify(productObj))
+    // warn user if product data is not configured properly
+
+
+    newBrowser.close();
+    console.log("\x1b[35m", '>>BROWSER CLOSED.', "\x1b[0m")
+    //console.log('Product Card:', productObj)
+  }
+
+  productData.push({
+    brokenLink: brokenLink
+  });
+  console.log("\x1b[0m", "\x1b[31m", '!!BROKEN LINK:', brokenLink, "\x1b[0m");
+  await writeToFile(productData, category)
+}
+
+
+
+
+// cache product data 
+async function writeToFile(results, category) {
+  console.log("\x1b[0m", "\x1b[33m", '>>WRITING FILE', `./productCategories/${category}.json`);
+  await fs.writeFile(`./productCategories/${category}.json`, '', async function () {
+    await console.log("\x1b[0m", "\x1b[32m", '>>FILE CLEARED')
+  })
+  // append json
+  await fs.appendFile(`./productCategories/${category}.json`, JSON.stringify(results), function (err) {
+    if (err) throw err;
+  })
+  console.log("\x1b[0m", "\x1b[47m", "\x1b[32m", 'AVON CRAWLER HAS SUCCESSFULY CACHED CATEGORY DATA!', "\x1b[0m");
+}
+
+async function screenshotDOMElement(opts = {}, page) {
+  const padding = 'padding' in opts ? opts.padding : 0;
+  const path = 'path' in opts ? opts.path : null;
+  const selector = opts.selector;
+
+  if (!selector)
+    throw Error('Please provide a selector.');
+
+  const rect = await page.evaluate(selector => {
+    const element = document.querySelector(selector);
+    if (!element)
+      return null;
+    const {
+      x,
+      y,
+      width,
+      height
+    } = element.getBoundingClientRect();
+    return {
+      left: x,
+      top: y,
+      width,
+      height,
+      id: element.id
+    };
+  }, selector);
+
+  if (!rect)
+    throw Error(`Could not find element that matches selector: ${selector}.`);
+
+  return await page.screenshot({
+    path,
+    clip: {
+      x: rect.left - padding,
+      y: rect.top - padding,
+      width: rect.width + padding * 2,
+      height: rect.height + padding * 2
+    }
+  });
+}
+
+
+// TESTING
+//crawl('https://kozmetik.avon.com.tr/301/parfum/')
+//crawl('https://kozmetik.avon.com.tr/304-379/kisisel-bakim/banyo-ve-spa-urunleri')
+/*
+const test = ['https://kozmetik.avon.com.tr/urun/304-379-9381/kisisel-bakim/banyo-ve-spa-urunleri/avon-banyo-kopugu-goodbye-tension',
+  'https://kozmetik.avon.com.tr/urun/304-379-9385/kisisel-bakim/banyo-ve-spa-urunleri/senses-infusions-zen-mandalinayasemin-dus-jeli',
+  'https://kozmetik.avon.com.tr/urun/304-379-9386/kisisel-bakim/banyo-ve-spa-urunleri/senses-infusions-zen-mandalinayasemin-sivi-el-sabunu',
+  'https://kozmetik.avon.com.tr/urun/304-379-9387/kisisel-bakim/banyo-ve-spa-urunleri/senses-precious-kremsi-dus-jeli',
+  'https://kozmetik.avon.com.tr/urun/304-379-9388/kisisel-bakim/banyo-ve-spa-urunleri/senses-precious-kremsi-dus-jeli'
+]
+getProductInfo(test);
+*/
+
+//let tester = ['https://kozmetik.avon.com.tr/urun/301-9717/parfum/frozen-parfum-seti-kiz-cocuklar-icin']
+
+//getProductInfo(tester)
+
+// export functions
+module.exports = {
+  crawl
+}
